@@ -253,3 +253,39 @@ class Progress(BaseModel):
     needs_review: int
     groups: list[GroupStats]
     focus_next: list[GroupStats] = Field(description="Groups most worth practicing next")
+
+
+# ---------------- practice planning ----------------
+
+class TopicIn(BaseModel):
+    """A topic the app can serve questions for (from its question bank)."""
+    topic_code: str
+    topic: str | None = None
+    domain_code: str | None = None
+    domain: str | None = None
+
+
+class PlanItem(BaseModel):
+    topic_code: str
+    topic: str | None
+    domain_code: str | None
+    domain: str | None
+    count: int
+    difficulty: Literal["easy", "medium", "hard"]
+    reason: Literal["weak", "new", "maintain"] = Field(description=(
+        "weak: many shaky/missed answers; new: little or no history; maintain: doing well, kept fresh"))
+    accuracy: float | None = Field(description="Recent accuracy, if there is enough history")
+
+
+class PracticePlan(BaseModel):
+    student: str
+    subject: str | None
+    length: int
+    items: list[PlanItem] = Field(description="How many questions of each topic, at what difficulty")
+
+
+class SeenItem(BaseModel):
+    item_ref: str
+    times: int
+    last_seen: datetime
+    last_correct: bool | None

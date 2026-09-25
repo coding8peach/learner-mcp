@@ -19,13 +19,17 @@ from learner_mcp.models import (
     Item,
     ItemIn,
     ItemResult,
+    PlanItem,
+    PracticePlan,
     Progress,
     Section,
     SectionIn,
     SessionResult,
     SessionStarted,
+    SeenItem,
     TestSet,
     TestSetSummary,
+    TopicIn,
 )
 
 MAX_LIMIT = 500
@@ -203,6 +207,18 @@ def submit_test_session(session_id, answers: dict, flagged: list[str] | None = N
                         where x.set_id = %s order by x.position, i.position""", (session["set_id"],))
         items = cur.fetchall()
 
+        # Refuse answers for questions that aren't in this test (a wrong id
+        # would otherwise be silently scored as a blank), and keep the
+        # session open so the app can fix it and submit again.
+        known = {str(row["id"]) for row in items}
+        unknown = sorted(set(answers) - known)
+        if unknown:
+            raise ValueError(
+                f"{len(unknown)} answer(s) are for questions not in this test: "
+                f"{', '.join(unknown[:5])}{'...' if len(unknown) > 5 else ''}. "
+                "Use the item ids from start_test_session. Nothing was saved."
+            )
+
         results: list[ItemResult] = []
         sections, domains, topics = {}, {}, {}
         for row in items:
@@ -352,3 +368,101 @@ def get_progress(student: str, subject: str | None = None, days: int = 90,
         shaky=sum(g.shaky for g in groups), missed=sum(g.missed for g in groups),
         needs_review=review, groups=groups, focus_next=focus,
     )
+
+
+# ---------------- practice planning ----------------
+
+def _difficulty(accuracy: float | None) -> str:
+    """Stretch students who are doing well; rebuild confidence when not."""
+    if accuracy is None:
+        return "medium"
+    if accuracy < 0.5:
+        return "easy"
+    if accuracy < 0.8:
+        return "medium"
+    return "hard"
+
+
+def _allocate(weights: list[float], total: int, must: list[bool]) -> list[int]:
+    """Split `total` questions by weight (largest remainder), giving every
+    `must` entry at least one when there's room."""
+    n = len(weights)
+    counts = [0] * n
+    remaining = total
+    for i in sorted(range(n), key=lambda i: -weights[i]):
+        if must[i] and remaining > 0:
+            counts[i] = 1
+            remaining -= 1
+    if remaining <= 0:
+        return counts
+    wsum = sum(weights) or 1.0
+    shares = [w / wsum * remaining for w in weights]
+    extra = [int(s) for s in shares]
+    left = remaining - sum(extra)
+    for i in sorted(range(n), key=lambda i: -(shares[i] - extra[i]))[:left]:
+        extra[i] += 1
+    return [c + e for c, e in zip(counts, extra)]
+
+
+def recommend_practice(student: str, subject: str | None = None, length: int = 10,
+                       topics: list | None = None, days: int = 90) -> PracticePlan:
+    """How many questions of each topic, at what difficulty, for a
+    personalized practice set. Weak topics get the most; new topics and
+    strong ones still get a share so nothing is left out or goes stale."""
+    length = max(1, min(int(length), 200))
+    progress = get_progress(student, subject, days)
+    stats = {g.code: g for g in progress.groups}
+
+    universe = [t if isinstance(t, TopicIn) else TopicIn(**t) for t in (topics or [])]
+    if not universe:      # no list from the app: plan over what the student has practiced
+        universe = [TopicIn(topic_code=g.code, topic=g.name) for g in progress.groups if g.code]
+    if not universe:
+        raise ValueError("No topics to plan from: pass `topics` (e.g. the question bank's skills).")
+
+    rows, weights, must = [], [], []
+    for t in universe:
+        g = stats.get(t.topic_code)
+        if g is None or g.done < FOCUS_MIN_DONE:
+            reason, weight, accuracy = "new", 1.0, (g.accuracy if g else None)
+        else:
+            weak = (g.shaky + g.missed) / g.done
+            reason = "weak" if weak >= FOCUS_MIN_WEAK_RATE else "maintain"
+            weight, accuracy = 0.5 + 2.5 * weak, g.accuracy
+        rows.append((t, reason, accuracy))
+        weights.append(weight)
+        must.append(reason == "weak")
+
+    counts = _allocate(weights, length, must)
+    order = {"weak": 0, "new": 1, "maintain": 2}
+    items = [
+        PlanItem(topic_code=t.topic_code, topic=t.topic or (stats[t.topic_code].name if t.topic_code in stats else None),
+                 domain_code=t.domain_code, domain=t.domain, count=c,
+                 difficulty=_difficulty(accuracy if reason != "new" else None),
+                 reason=reason, accuracy=accuracy)
+        for (t, reason, accuracy), c in zip(rows, counts) if c > 0
+    ]
+    items.sort(key=lambda p: (order[p.reason], -p.count, p.topic or p.topic_code))
+    return PracticePlan(student=student, subject=subject, length=length, items=items)
+
+
+def get_seen_items(student: str, subject: str | None = None, days: int | None = None,
+                   limit: int = 2000) -> list[SeenItem]:
+    """Questions the student has already answered (by item_ref), so new
+    sets can skip them, or bring back missed ones on purpose."""
+    limit = max(1, min(int(limit), 10000))
+    with get_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            select item_ref, count(*) as times, max(created_at) as last_seen,
+                   (array_agg(correct_final order by created_at desc))[1] as last_correct
+              from learner.attempts
+             where student = %(student)s and item_ref is not null
+               and (%(subject)s::text is null or subject = %(subject)s)
+               and (%(days)s::int is null or created_at > now() - make_interval(days => %(days)s))
+             group by item_ref
+             order by max(created_at) desc
+             limit %(limit)s
+            """,
+            {"student": student, "subject": subject, "days": days, "limit": limit},
+        )
+        return [SeenItem(**row) for row in cur.fetchall()]

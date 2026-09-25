@@ -15,6 +15,9 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from learner_mcp import repository as repo
 from learner_mcp.models import (
+    PracticePlan,
+    SeenItem,
+    TopicIn,
     Attempt,
     AttemptIn,
     Created,
@@ -177,6 +180,43 @@ def get_progress(student: str, subject: str | None = None, days: int = 90,
     """
     with expected_errors():
         return repo.get_progress(student, subject, days, group_by)
+
+
+# ---------------- planning ----------------
+
+@mcp.tool()
+def recommend_practice(
+    student: str,
+    subject: str | None = None,
+    length: int = 10,
+    topics: list[TopicIn] | None = None,
+    days: int = 90,
+) -> PracticePlan:
+    """
+    Plan a personalized practice set: how many questions of each topic and
+    at what difficulty (easy / medium / hard). Weak topics (many shaky or
+    missed answers) get the most questions; new topics and strong ones
+    still get a share. Returns a plan, not questions: fetch matching
+    questions from the content server (e.g. sat-mcp find_questions).
+
+    Args:
+        topics: every topic the app can serve (e.g. the question bank's
+                skills). If omitted, plans over topics already practiced.
+        length: total questions (1-200)
+    """
+    with expected_errors():
+        return repo.recommend_practice(student, subject, length, topics, days)
+
+
+@mcp.tool()
+def get_seen_items(student: str, subject: str | None = None, days: int | None = None) -> list[SeenItem]:
+    """
+    Questions (item_refs) the student has already answered, newest first,
+    with how many times and whether the last try was right. Use it to
+    skip repeats, or to bring back missed questions on purpose.
+    """
+    with expected_errors():
+        return repo.get_seen_items(student, subject, days)
 
 
 @mcp.custom_route("/health", methods=["GET"])

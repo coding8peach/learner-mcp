@@ -18,6 +18,8 @@ sittings, record practice attempts, and show each student what to work on next.
 | `record_attempt` | Save one practice answer: `strong`, `shaky` (right but shaky reasoning/guess) or `missed`. |
 | `get_progress` | Per topic or per domain: strong / shaky / missed, practice vs. timed accuracy, average time, and **focus_next**. |
 | `list_attempts` | Recent history. |
+| `recommend_practice` | A personalized plan: how many questions of each topic, at what difficulty. Weak topics get the most; new and strong ones still get a share. Returns topics, not questions, so it works with any question source. |
+| `get_seen_items` | Questions a student already answered, to skip repeats or bring back missed ones. |
 
 ### Questions
 
@@ -52,6 +54,15 @@ to one subject or exam.
 Access keys work like sat-mcp: `uv run python scripts/new_api_key.py sidekick`,
 put the whole `name:key` line in `LEARNER_MCP_API_KEYS` on the server, and
 give the app only the key part. `/health` is open for health checks.
+
+## Tests
+
+    uv run pytest
+
+runs the grading and validation tests. The database tests run only when
+`TEST_DATABASE_URL` points at a **throwaway** Postgres (with `scripts/schema.sql`
+and the app login applied), so they can never touch real data. GitHub Actions
+does exactly that on every push (`.github/workflows/tests.yml`).
 
 ## Environment
 

@@ -69,3 +69,10 @@ def test_response_text():
     assert response_text("multi_choice", ["c", "a"]) == "A,C"
     assert response_text("numeric", " 0.75 ") == "0.75"
     assert response_text("single_choice", "") is None
+
+
+def test_allocate_by_weight():
+    from learner_mcp.repository import _allocate
+    assert _allocate([3.0, 1.0], 8, [False, False]) == [6, 2]
+    assert sum(_allocate([1.0, 1.0, 1.0], 10, [False] * 3)) == 10
+    assert _allocate([0.5, 3.0], 1, [False, True]) == [0, 1]      # weak topic keeps its spot
