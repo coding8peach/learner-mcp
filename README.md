@@ -53,6 +53,15 @@ Access keys work like sat-mcp: `uv run python scripts/new_api_key.py sidekick`,
 put the whole `name:key` line in `LEARNER_MCP_API_KEYS` on the server, and
 give the app only the key part. `/health` is open for health checks.
 
+## Tests
+
+    uv run pytest
+
+runs the grading and validation tests. The database tests run only when
+`TEST_DATABASE_URL` points at a **throwaway** Postgres (with `scripts/schema.sql`
+and the app login applied), so they can never touch real data. GitHub Actions
+does exactly that on every push (`.github/workflows/tests.yml`).
+
 ## Environment
 
 | Variable | |
