@@ -1,0 +1,23 @@
+[project]
+name = "learner-mcp"
+version = "0.1.0"
+description = "MCP server for timed tests and learning progress, for any subject: test sets, graded sittings, attempts, and per-topic learner."
+readme = "README.md"
+authors = [
+    { name = "Karen Yang", email = "212205507+coding8peach@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]>=2.2.0",
+    "psycopg[binary]>=3.3.6",
+    "psycopg-pool>=3.2",
+    "pydantic>=2",
+    "python-dotenv>=1.2.3",
+]
+
+[project.scripts]
+learner-mcp = "learner_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"
