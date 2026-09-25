@@ -125,3 +125,50 @@ def test_unknown_ids(repo):
         repo.get_test_set(uuid.uuid4())
     with pytest.raises(ValueError, match="valid"):
         repo.get_test_set("nope")
+
+
+# ---------------- planning ----------------
+
+def _practice(repo, student, topic, results):
+    from learner_mcp.models import AttemptIn
+    for i, (ok, reasoning) in enumerate(results):
+        repo.record_attempt(AttemptIn(student=student, subject="plan", item_ref=f"{topic}:{i}",
+                                      topic_code=topic, topic=topic.title(),
+                                      correct_final=ok, reasoning=reasoning))
+
+
+def test_recommend_practice_weights_weak_topics(repo, student):
+    _practice(repo, student, "weak", [(False, "missed"), (False, "missed"), (False, "missed"), (True, "shaky")])
+    _practice(repo, student, "strong", [(True, "strong")] * 5)
+    topics = [{"topic_code": c, "topic": c.title()} for c in ("weak", "strong", "fresh")]
+    plan = repo.recommend_practice(student, "plan", length=10, topics=topics)
+
+    by = {p.topic_code: p for p in plan.items}
+    assert sum(p.count for p in plan.items) == 10
+    assert by["weak"].reason == "weak" and by["weak"].count > by["strong"].count
+    assert by["weak"].difficulty == "easy"            # 25% accuracy: rebuild confidence
+    assert by["strong"].reason == "maintain" and by["strong"].difficulty == "hard"
+    assert by["fresh"].reason == "new" and by["fresh"].difficulty == "medium"
+    assert plan.items[0].topic_code == "weak"          # weakest first
+
+
+def test_recommend_practice_small_sets_keep_weak_topics(repo, student):
+    _practice(repo, student, "weak", [(False, "missed")] * 4)
+    topics = [{"topic_code": c} for c in ("weak", "a", "b", "c", "d")]
+    plan = repo.recommend_practice(student, "plan", length=2, topics=topics)
+    assert sum(p.count for p in plan.items) == 2
+    assert "weak" in [p.topic_code for p in plan.items]
+
+
+def test_recommend_practice_needs_topics(repo):
+    with pytest.raises(ValueError, match="No topics"):
+        repo.recommend_practice("nobody-" + uuid.uuid4().hex)
+
+
+def test_seen_items(repo, student):
+    _practice(repo, student, "t", [(False, "missed"), (True, "strong")])
+    _practice(repo, student, "t", [(True, "strong")])      # t:0 answered again, now right
+    seen = {s.item_ref: s for s in repo.get_seen_items(student, "plan")}
+    assert set(seen) == {"t:0", "t:1"}
+    assert seen["t:0"].times == 2 and seen["t:0"].last_correct is True
+    assert seen["t:1"].times == 1

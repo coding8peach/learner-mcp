@@ -203,18 +203,6 @@ def submit_test_session(session_id, answers: dict, flagged: list[str] | None = N
                         where x.set_id = %s order by x.position, i.position""", (session["set_id"],))
         items = cur.fetchall()
 
-        # Refuse answers for questions that aren't in this test (a wrong id
-        # would otherwise be silently scored as a blank), and keep the
-        # session open so the app can fix it and submit again.
-        known = {str(row["id"]) for row in items}
-        unknown = sorted(set(answers) - known)
-        if unknown:
-            raise ValueError(
-                f"{len(unknown)} answer(s) are for questions not in this test: "
-                f"{', '.join(unknown[:5])}{'...' if len(unknown) > 5 else ''}. "
-                "Use the item ids from start_test_session. Nothing was saved."
-            )
-
         results: list[ItemResult] = []
         sections, domains, topics = {}, {}, {}
         for row in items:
