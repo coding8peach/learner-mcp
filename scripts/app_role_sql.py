@@ -5,7 +5,8 @@ Paste the output into the Supabase SQL editor, after scripts/schema.sql.
     uv run python scripts/app_role_sql.py
 
 The login can read and write the "learner" tables and nothing else:
-no question banks, no other schemas, no deleting rows.
+no question banks, no other schemas. It can delete only people and
+their own history (attempts, test sittings), for "remove this person".
 """
 from urllib.parse import unquote, urlsplit
 
@@ -14,7 +15,8 @@ from dotenv import dotenv_values
 url = urlsplit(dotenv_values(".env")["DATABASE_URL"])
 role = url.username.split(".")[0]
 password = unquote(url.password).replace("'", "''")
-tables = ["test_sets", "test_sections", "test_items", "test_sessions", "attempts"]
+tables = ["test_sets", "test_sections", "test_items", "test_sessions", "attempts", "people"]
+deletable = ["people", "attempts", "test_sessions"]   # removing a person erases their history
 
 print(f"""
 -- login for the learner-mcp server
@@ -28,6 +30,7 @@ end $$;
 
 grant usage on schema learner to {role};
 grant select, insert, update on {", ".join("learner." + t for t in tables)} to {role};
+grant delete on {", ".join("learner." + t for t in deletable)} to {role};
 
 -- keep Supabase's public API out
 revoke all on schema learner from anon, authenticated;

@@ -100,9 +100,25 @@ create index if not exists attempts_student_topic on learner.attempts (student, 
 create index if not exists attempts_student_domain on learner.attempts (student, subject, domain_code);
 create index if not exists sessions_student       on learner.test_sessions (student, started_at desc);
 
+-- People who can sign in to the apps. Added by a parent; no self sign-up.
+-- Passcodes are salted hashes; emails are never stored, only a keyed
+-- fingerprint (HMAC-SHA256 with LEARNER_EMAIL_KEY) for matching.
+create table if not exists learner.people (
+    username       text primary key check (username ~ '^[a-z0-9][a-z0-9_.-]{1,31}$'),
+    display_name   text,
+    role           text not null default 'student' check (role in ('student', 'parent')),
+    passcode_hash  text,
+    email_fp       text unique,
+    active         boolean not null default true,
+    created_at     timestamptz not null default now(),
+    updated_at     timestamptz not null default now(),
+    last_sign_in   timestamptz
+);
+
 -- Row-level security on: nothing is readable through Supabase's public API
 alter table learner.test_sets     enable row level security;
 alter table learner.test_sections enable row level security;
 alter table learner.test_items    enable row level security;
 alter table learner.test_sessions enable row level security;
 alter table learner.attempts      enable row level security;
+alter table learner.people        enable row level security;

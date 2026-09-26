@@ -5,6 +5,8 @@ Works for any subject. Apps (Sidekick, AdaptiveSAT, ...) use it to:
   - run timed sittings, graded here so answers never reach the student early
   - record every practice attempt
   - read a student's progress by topic, with what to focus on next
+  - manage who can sign in (people added by a parent; emails kept only
+    as fingerprints)
 """
 import logging
 from contextlib import contextmanager
@@ -14,6 +16,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from learner_mcp import repository as repo
+from learner_mcp import people
 from learner_mcp.models import (
     PracticePlan,
     SeenItem,
@@ -21,6 +24,7 @@ from learner_mcp.models import (
     Attempt,
     AttemptIn,
     Created,
+    Person,
     Progress,
     SectionIn,
     SessionResult,
@@ -217,6 +221,80 @@ def get_seen_items(student: str, subject: str | None = None, days: int | None = 
     """
     with expected_errors():
         return repo.get_seen_items(student, subject, days)
+
+
+# ---------------- people ----------------
+
+@mcp.tool()
+def add_person(
+    username: str,
+    display_name: str | None = None,
+    role: str = "student",
+    passcode: str | None = None,
+    email: str | None = None,
+    passcode_hash: str | None = None,
+) -> Person:
+    """
+    Add someone who can sign in (a parent adds people; there's no self
+    sign-up).
+
+    Args:
+        username: sign-in name, e.g. "kk"; their progress is saved under it
+        role: "student" or "parent" (parents can manage people)
+        passcode: easy to remember, at least 6 letters/digits ("maple otter 42");
+                  stored only as a salted hash
+        email: optional, to match answers from e.g. Google Forms. Stored only
+               as a keyed fingerprint, never as the email itself
+        passcode_hash: instead of passcode, an existing pbkdf2$... hash (to
+               move people over from an app's old passcode list)
+    """
+    with expected_errors():
+        return people.add_person(username, display_name, role, passcode, email, passcode_hash)
+
+
+@mcp.tool()
+def update_person(
+    username: str,
+    display_name: str | None = None,
+    role: str | None = None,
+    active: bool | None = None,
+    passcode: str | None = None,
+    email: str | None = None,
+) -> Person:
+    """Change someone's details. Leave a field out to keep it; email="" removes
+    the email. active=false blocks sign-in but keeps their history."""
+    with expected_errors():
+        return people.update_person(username, display_name, role, active, passcode, email)
+
+
+@mcp.tool()
+def list_people(include_inactive: bool = True) -> list[Person]:
+    """Everyone who can (or could) sign in. No passcodes or emails."""
+    with expected_errors():
+        return people.list_people(include_inactive)
+
+
+@mcp.tool()
+def sign_in(username: str, passcode: str) -> Person:
+    """Check a user name + passcode. Returns the person, or an error saying
+    only "Wrong user name or passcode." (never which one was wrong)."""
+    with expected_errors():
+        return people.sign_in(username, passcode)
+
+
+@mcp.tool()
+def find_person_by_email(email: str) -> Person | None:
+    """Who has this email (e.g. the address on a Google Form answer), or null."""
+    with expected_errors():
+        return people.find_person_by_email(email)
+
+
+@mcp.tool()
+def delete_person(username: str, delete_history: bool = True) -> dict:
+    """Remove someone for good. With delete_history (default), also erase
+    every attempt and test sitting saved under their user name."""
+    with expected_errors():
+        return people.delete_person(username, delete_history)
 
 
 @mcp.custom_route("/health", methods=["GET"])

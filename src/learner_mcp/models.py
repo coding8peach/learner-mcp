@@ -289,3 +289,17 @@ class SeenItem(BaseModel):
     times: int
     last_seen: datetime
     last_correct: bool | None
+
+
+# ---------------- people ----------------
+
+class Person(BaseModel):
+    """Someone who can sign in. Never includes the passcode or email."""
+    username: str = Field(description="Sign-in name; progress is saved under it")
+    display_name: str | None = None
+    role: Literal["student", "parent"]
+    active: bool
+    has_passcode: bool
+    has_email: bool = Field(description="An email fingerprint is on file (the email itself is never stored)")
+    created_at: datetime
+    last_sign_in: datetime | None = None

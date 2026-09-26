@@ -20,6 +20,10 @@ sittings, record practice attempts, and show each student what to work on next.
 | `list_attempts` | Recent history. |
 | `recommend_practice` | A personalized plan: how many questions of each topic, at what difficulty. Weak topics get the most; new and strong ones still get a share. Returns topics, not questions, so it works with any question source. |
 | `get_seen_items` | Questions a student already answered, to skip repeats or bring back missed ones. |
+| `add_person` / `update_person` / `list_people` | Who can sign in: user name, role (student or parent), passcode, optional email. Added by a parent; no self sign-up. |
+| `sign_in` | Check a user name + passcode. |
+| `find_person_by_email` | Match an email (e.g. from a Google Form answer) to a student. |
+| `delete_person` | Remove someone and, by default, erase their history. |
 
 ### Questions
 
@@ -55,6 +59,18 @@ Access keys work like sat-mcp: `uv run python scripts/new_api_key.py sidekick`,
 put the whole `name:key` line in `LEARNER_MCP_API_KEYS` on the server, and
 give the app only the key part. `/health` is open for health checks.
 
+## Privacy
+
+- Passcodes are stored only as salted PBKDF2 hashes.
+- Emails are never stored: only a keyed fingerprint (HMAC-SHA256 with
+  `LEARNER_EMAIL_KEY`), enough to recognize an address again but not to
+  read it back. A leaked database shows no emails.
+- Progress is saved under a user name (a nickname), not a real name.
+- `delete_person` erases someone's attempts and test sittings too.
+
+Adding people to an existing database: run `scripts/migrations/002_people.sql`
+in the Supabase SQL editor.
+
 ## Tests
 
     uv run pytest
@@ -70,5 +86,6 @@ does exactly that on every push (`.github/workflows/tests.yml`).
 |---|---|
 | `DATABASE_URL` | the `learner`-only login |
 | `LEARNER_MCP_API_KEYS` | `name:key,name:key` (HTTP mode) |
+| `LEARNER_EMAIL_KEY` | secret for email fingerprints (24+ random characters, e.g. from `scripts/new_api_key.py`). Keep it: changing it makes stored fingerprints stop matching. |
 | `DB_POOL_MAX` | max pooled connections (default 5) |
 | `HOST` / `PORT` | HTTP bind address (defaults `0.0.0.0` / `8000`) |
