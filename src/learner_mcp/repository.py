@@ -25,7 +25,9 @@ from learner_mcp.models import (
     Section,
     SectionIn,
     SessionResult,
+    SessionDetail,
     SessionStarted,
+    SessionSummary,
     SeenItem,
     TestSet,
     TestSetSummary,
@@ -91,9 +93,10 @@ def _insert_item(cur, section_id, position: int, item: ItemIn):
     )
 
 
-def list_test_sets(subject: str | None = None, status: str | None = "ready") -> list[TestSetSummary]:
+def list_test_sets(subject: str | None = None, status: str | None = "ready",
+                   app: str | None = None) -> list[TestSetSummary]:
     sql = """
-        select s.id, s.title, s.subject, s.source, s.status, s.created_at,
+        select s.id, s.title, s.subject, s.source, s.status, s.created_at, s.created_by, s.meta,
                (select count(*) from learner.test_items i
                   join learner.test_sections x on x.id = i.section_id
                  where x.set_id = s.id) as question_count,
@@ -102,10 +105,11 @@ def list_test_sets(subject: str | None = None, status: str | None = "ready") -> 
           from learner.test_sets s
          where (%(subject)s::text is null or s.subject = %(subject)s)
            and (%(status)s::text is null or s.status = %(status)s)
+           and (%(app)s::text is null or s.created_by = %(app)s)
          order by s.created_at desc
     """
     with get_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql, {"subject": subject, "status": status})
+        cur.execute(sql, {"subject": subject, "status": status, "app": app})
         return [TestSetSummary(**row) for row in cur.fetchall()]
 
 
@@ -154,17 +158,39 @@ def set_test_set_status(set_id, status: str) -> None:
 
 # ---------------- sessions ----------------
 
-def start_test_session(set_id, student: str, app: str | None = None) -> SessionStarted:
+def start_test_session(set_id, student: str, app: str | None = None,
+                       external_ref: str | None = None, meta: dict | None = None) -> SessionStarted:
+    """Start a sitting. With external_ref (an id from outside, e.g. a Google
+    Forms response), starting again returns the same sitting instead of a
+    new one, so an app can safely retry."""
     test = get_test_set(set_id, include_answers=False)
-    if test.status != "ready":
-        raise ValueError(f"This test is {test.status}, not ready to take.")
-    if not student.strip():
+    student = student.strip()
+    if not student:
         raise ValueError("student is required")
-    with get_connection() as conn, conn.cursor() as cur:
-        cur.execute("""insert into learner.test_sessions (set_id, student, app)
-                       values (%s, %s, %s) returning id""", (test.id, student.strip(), app))
-        session_id = cur.fetchone()[0]
-    return SessionStarted(session_id=session_id, test=test)
+    external_ref = (external_ref or "").strip() or None
+
+    with get_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        if external_ref:
+            cur.execute("""select id, set_id, student, finished_at from learner.test_sessions
+                            where app is not distinct from %s and external_ref = %s""",
+                        (app, external_ref))
+            existing = cur.fetchone()
+            if existing:
+                if existing["set_id"] != test.id or existing["student"] != student:
+                    raise ValueError(
+                        f"external_ref {external_ref!r} already belongs to another sitting "
+                        f"({existing['student']}, test {existing['set_id']}).")
+                return SessionStarted(session_id=existing["id"], test=test,
+                                      external_ref=external_ref,
+                                      finished=existing["finished_at"] is not None)
+
+        if test.status != "ready":
+            raise ValueError(f"This test is {test.status}, not ready to take.")
+        cur.execute("""insert into learner.test_sessions (set_id, student, app, external_ref, meta)
+                       values (%s, %s, %s, %s, %s) returning id""",
+                    (test.id, student, app, external_ref, Jsonb(meta or {})))
+        session_id = cur.fetchone()["id"]
+    return SessionStarted(session_id=session_id, test=test, external_ref=external_ref)
 
 
 def _tally(groups: dict, code, name, correct: bool | None, earned: float | None, possible: float):
@@ -184,9 +210,14 @@ def _scores(groups: dict) -> list[GroupScore]:
 
 
 def submit_test_session(session_id, answers: dict, flagged: list[str] | None = None,
-                        seconds_by_item: dict[str, float] | None = None) -> SessionResult:
+                        seconds_by_item: dict[str, float] | None = None,
+                        submitted_at=None) -> SessionResult:
     """Grade a finished sitting, store its attempts, and return the results
-    (including the accepted answers, now that the test is over)."""
+    (including the accepted answers, now that the test is over).
+
+    Attempts count as 'timed' when any section has a time limit, otherwise
+    as 'practice' (e.g. an untimed set sent as a Google Form).
+    submitted_at: when the student actually finished, if not just now."""
     session_id = _uuid(session_id, "session")
     flagged_ids = {str(x) for x in (flagged or [])}
     seconds_by_item = {str(k): v for k, v in (seconds_by_item or {}).items()}
@@ -201,6 +232,9 @@ def submit_test_session(session_id, answers: dict, flagged: list[str] | None = N
             raise ValueError("This session was already submitted.")
         cur.execute("select subject from learner.test_sets where id = %s", (session["set_id"],))
         subject = cur.fetchone()["subject"]
+        cur.execute("""select coalesce(bool_or(time_limit_seconds is not null), false) as timed
+                         from learner.test_sections where set_id = %s""", (session["set_id"],))
+        mode = "timed" if cur.fetchone()["timed"] else "practice"
         cur.execute("""select i.*, x.title as section_title
                          from learner.test_items i
                          join learner.test_sections x on x.id = i.section_id
@@ -249,15 +283,16 @@ def submit_test_session(session_id, answers: dict, flagged: list[str] | None = N
             if correct is not None or needs_review:
                 cur.execute(
                     """insert into learner.attempts
-                         (student, app, subject, item_ref, kind, domain_code, domain, topic_code,
-                          topic, difficulty, mode, session_id, first_answer, final_answer,
+                         (created_at, student, app, subject, item_ref, kind, domain_code, domain,
+                          topic_code, topic, difficulty, mode, session_id, first_answer, final_answer,
                           correct_first, correct_final, reasoning, needs_review, points_earned,
                           points_possible, flagged, seconds, meta)
-                       values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'timed', %s, %s, %s, %s, %s,
-                               %s, %s, %s, %s, %s, %s, %s)""",
-                    (session["student"], session["app"], subject, row["item_ref"] or f"item:{item_id}",
+                       values (coalesce(%s, now()), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                               %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (submitted_at, session["student"], session["app"], subject,
+                     row["item_ref"] or f"item:{item_id}",
                      row["kind"], row["domain_code"], row["domain"], row["topic_code"], row["topic"],
-                     row["difficulty"], session_id, chosen, chosen, correct, correct, reasoning,
+                     row["difficulty"], mode, session_id, chosen, chosen, correct, correct, reasoning,
                      needs_review, earned, points, is_flagged, seconds_by_item.get(item_id),
                      Jsonb({"test_item_id": item_id})),
                 )
@@ -275,14 +310,87 @@ def submit_test_session(session_id, answers: dict, flagged: list[str] | None = N
             items=results,
         )
         cur.execute("""update learner.test_sessions
-                          set finished_at = now(), answers = %s, score = %s where id = %s""",
-                    (Jsonb({"answers": answers, "flagged": sorted(flagged_ids)}),
+                          set finished_at = coalesce(%s, now()), answers = %s, score = %s
+                        where id = %s""",
+                    (submitted_at, Jsonb({"answers": answers, "flagged": sorted(flagged_ids)}),
                      Jsonb({"correct": result.correct, "graded": result.graded, "total": result.total,
                             "points_earned": result.points_earned,
                             "points_possible": result.points_possible,
                             "needs_review": result.needs_review}),
                      session_id))
     return result
+
+
+def _session_summary(row: dict) -> SessionSummary:
+    return SessionSummary(
+        session_id=row["id"], set_id=row["set_id"], set_title=row["set_title"],
+        student=row["student"], app=row["app"], external_ref=row.get("external_ref"),
+        started_at=row.get("started_at") or row.get("created_at"),
+        finished_at=row["finished_at"], score=row.get("score") or None,
+        meta=row.get("meta") or {},
+    )
+
+
+_SESSION_SQL = """
+    select s.*, t.title as set_title
+      from learner.test_sessions s
+      join learner.test_sets t on t.id = s.set_id
+"""
+
+
+def list_test_sessions(student: str | None = None, set_id=None, app: str | None = None,
+                       finished: bool | None = None, external_ref: str | None = None,
+                       limit: int = 50) -> list[SessionSummary]:
+    limit = max(1, min(int(limit), MAX_LIMIT))
+    params = {
+        "student": student, "app": app, "external_ref": external_ref,
+        "set_id": _uuid(set_id, "test") if set_id else None,
+        "finished": finished, "limit": limit,
+    }
+    sql = _SESSION_SQL + """
+     where (%(student)s::text is null or s.student = %(student)s)
+       and (%(set_id)s::uuid is null or s.set_id = %(set_id)s)
+       and (%(app)s::text is null or s.app = %(app)s)
+       and (%(external_ref)s::text is null or s.external_ref = %(external_ref)s)
+       and (%(finished)s::boolean is null or (s.finished_at is not null) = %(finished)s)
+     order by s.finished_at desc nulls first
+     limit %(limit)s
+    """
+    with get_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        return [_session_summary(row) for row in cur.fetchall()]
+
+
+def get_test_session(session_id) -> SessionDetail:
+    session_id = _uuid(session_id, "session")
+    with get_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_SESSION_SQL + " where s.id = %s", (session_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Session not found: {session_id}")
+        cur.execute(
+            """select a.* from learner.attempts a
+                 left join learner.test_items i on i.id::text = a.meta->>'test_item_id'
+                 left join learner.test_sections x on x.id = i.section_id
+                where a.session_id = %s
+                order by x.position, i.position""",
+            (session_id,),
+        )
+        attempts = cur.fetchall()
+    return SessionDetail(**_session_summary(row).model_dump(),
+                         attempts=[_attempt(a) for a in attempts])
+
+
+def update_test_session(session_id, meta: dict) -> SessionSummary:
+    """Merge notes into a sitting's meta (top-level keys are replaced)."""
+    session_id = _uuid(session_id, "session")
+    with get_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("""update learner.test_sessions set meta = coalesce(meta, '{}'::jsonb) || %s
+                        where id = %s""", (Jsonb(meta or {}), session_id))
+        if cur.rowcount == 0:
+            raise ValueError(f"Session not found: {session_id}")
+        cur.execute(_SESSION_SQL + " where s.id = %s", (session_id,))
+        return _session_summary(cur.fetchone())
 
 
 # ---------------- attempts & progress ----------------
@@ -310,13 +418,15 @@ def list_attempts(student: str, subject: str | None = None, limit: int = 50) -> 
             (student, subject, subject, limit),
         )
         rows = cur.fetchall()
-    out = []
-    for row in rows:
-        row.pop("session_id", None)
-        for k in ("seconds", "points_earned", "points_possible"):
-            row[k] = _num(row[k])
-        out.append(Attempt(**row))
-    return out
+    return [_attempt(row) for row in rows]
+
+
+def _attempt(row: dict) -> Attempt:
+    row = dict(row)
+    row.pop("session_id", None)
+    for k in ("seconds", "points_earned", "points_possible"):
+        row[k] = _num(row[k])
+    return Attempt(**row)
 
 
 def get_progress(student: str, subject: str | None = None, days: int = 90,

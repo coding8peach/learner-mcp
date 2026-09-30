@@ -2,7 +2,8 @@
 
 Works for any subject. Apps (Sidekick, AdaptiveSAT, ...) use it to:
   - save test sets (from a question bank, an uploaded PDF, or by hand)
-  - run timed sittings, graded here so answers never reach the student early
+  - run sittings (timed in an app, or untimed, e.g. sent as a Google Form),
+    graded here so answers never reach the student early
   - record every practice attempt
   - read a student's progress by topic, with what to focus on next
   - manage who can sign in (people added by a parent; emails kept only
@@ -10,6 +11,7 @@ Works for any subject. Apps (Sidekick, AdaptiveSAT, ...) use it to:
 """
 import logging
 from contextlib import contextmanager
+from datetime import datetime
 
 import psycopg
 from mcp.server import MCPServer
@@ -27,8 +29,10 @@ from learner_mcp.models import (
     Person,
     Progress,
     SectionIn,
+    SessionDetail,
     SessionResult,
     SessionStarted,
+    SessionSummary,
     TestSet,
     TestSetSummary,
 )
@@ -87,10 +91,12 @@ def create_test_set(
 
 
 @mcp.tool()
-def list_test_sets(subject: str | None = None, status: str | None = "ready") -> list[TestSetSummary]:
-    """List saved tests (newest first). status=None lists every status."""
+def list_test_sets(subject: str | None = None, status: str | None = "ready",
+                   app: str | None = None) -> list[TestSetSummary]:
+    """List saved tests (newest first), with their meta. status=None lists
+    every status; app lists only tests that app created."""
     with expected_errors():
-        return repo.list_test_sets(subject, status)
+        return repo.list_test_sets(subject, status, app)
 
 
 @mcp.tool()
@@ -116,14 +122,22 @@ def set_test_set_status(set_id: str, status: str) -> dict:
 # ---------------- timed sittings ----------------
 
 @mcp.tool()
-def start_test_session(set_id: str, student: str, app: str | None = None) -> SessionStarted:
+def start_test_session(set_id: str, student: str, app: str | None = None,
+                       external_ref: str | None = None, meta: dict | None = None) -> SessionStarted:
     """
     Start a sitting of a ready test for a student. Returns the session id
-    and the test WITHOUT answers. The app runs the clock; submit with
-    submit_test_session.
+    and the test WITHOUT answers. The app runs the clock (if the test is
+    timed); submit with submit_test_session.
+
+    Args:
+        external_ref: an id from outside this server, e.g. "gforms:<responseId>".
+                      Unique per app: starting again with the same ref returns
+                      the existing sitting (finished=true if already submitted),
+                      so a retry never creates a duplicate.
+        meta: free-form notes to keep with the sitting
     """
     with expected_errors():
-        return repo.start_test_session(set_id, student, app)
+        return repo.start_test_session(set_id, student, app, external_ref, meta)
 
 
 @mcp.tool()
@@ -132,12 +146,14 @@ def submit_test_session(
     answers: dict[str, str | list[str]],
     flagged: list[str] | None = None,
     seconds_by_item: dict[str, float] | None = None,
+    submitted_at: datetime | None = None,
 ) -> SessionResult:
     """
-    Finish a sitting: grade it, save every question as a timed attempt,
-    and return points and counts by section, domain and topic, plus each
-    question's result (with the accepted answers, now that it's over).
-    Free responses are saved as needing review, not guessed at.
+    Finish a sitting: grade it, save every question as an attempt ("timed"
+    if the test has a time limit, otherwise "practice"), and return points
+    and counts by section, domain and topic, plus each question's result
+    (with the accepted answers, now that it's over). Free responses are
+    saved as needing review, not guessed at.
 
     Args:
         answers: {item_id: response}: a label ("B"), labels ("A,C" or
@@ -146,9 +162,42 @@ def submit_test_session(
         flagged: item ids the student marked as unsure (right + flagged
                  counts as "shaky")
         seconds_by_item: optional time spent per item
+        submitted_at: when the student actually finished, if earlier than now
+                      (e.g. a form response graded later)
     """
     with expected_errors():
-        return repo.submit_test_session(session_id, answers, flagged, seconds_by_item)
+        return repo.submit_test_session(session_id, answers, flagged, seconds_by_item,
+                                        submitted_at)
+
+
+@mcp.tool()
+def update_test_session(session_id: str, meta: dict) -> SessionSummary:
+    """Merge notes into a sitting's meta, e.g. {"report_sent": true} or tutor
+    explanations. Top-level keys are replaced; others are kept."""
+    with expected_errors():
+        return repo.update_test_session(session_id, meta)
+
+
+@mcp.tool()
+def list_test_sessions(
+    student: str | None = None,
+    set_id: str | None = None,
+    app: str | None = None,
+    finished: bool | None = None,
+    external_ref: str | None = None,
+    limit: int = 50,
+) -> list[SessionSummary]:
+    """Sittings with their scores and meta (unfinished first, then newest
+    finished). Filter by student, test, app, finished or external_ref."""
+    with expected_errors():
+        return repo.list_test_sessions(student, set_id, app, finished, external_ref, limit)
+
+
+@mcp.tool()
+def get_test_session(session_id: str) -> SessionDetail:
+    """One sitting with the saved attempt for each graded question, in test order."""
+    with expected_errors():
+        return repo.get_test_session(session_id)
 
 
 # ---------------- attempts & progress ----------------

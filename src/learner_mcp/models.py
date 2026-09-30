@@ -119,6 +119,8 @@ class TestSetSummary(BaseModel):
     question_count: int
     total_seconds: int | None
     created_at: datetime
+    created_by: str | None = Field(default=None, description="The app that created it")
+    meta: dict = Field(default_factory=dict)
 
 
 class TestSet(BaseModel):
@@ -142,6 +144,29 @@ class Created(BaseModel):
 class SessionStarted(BaseModel):
     session_id: UUID
     test: TestSet = Field(description="The test without answers")
+    external_ref: str | None = None
+    finished: bool = Field(default=False, description=(
+        "True when an existing sitting was returned for this external_ref "
+        "and it has already been submitted"))
+
+
+class SessionSummary(BaseModel):
+    """One sitting of a test, without its per-question results."""
+    session_id: UUID
+    set_id: UUID
+    set_title: str
+    student: str
+    app: str | None
+    external_ref: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    score: dict | None = Field(description="correct, graded, total, points_earned, points_possible, needs_review")
+    meta: dict
+
+
+class SessionDetail(SessionSummary):
+    """A sitting plus the attempt saved for each graded question."""
+    attempts: list["Attempt"]
 
 
 class ItemResult(BaseModel):
@@ -303,3 +328,6 @@ class Person(BaseModel):
     has_email: bool = Field(description="An email fingerprint is on file (the email itself is never stored)")
     created_at: datetime
     last_sign_in: datetime | None = None
+
+
+SessionDetail.model_rebuild()
