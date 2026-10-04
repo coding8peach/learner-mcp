@@ -2,9 +2,10 @@
 
 Privacy by design:
   - passcodes are stored only as salted PBKDF2 hashes
-  - emails are never stored: only a keyed fingerprint (HMAC-SHA256 with
-    LEARNER_EMAIL_KEY), enough to recognize an email again (e.g. a Google
-    Form answer) but not to read it back
+  - emails are never stored readable: a keyed fingerprint (HMAC-SHA256 with
+    LEARNER_EMAIL_KEY) recognizes an email again (e.g. a Google Form answer),
+    and, when LEARNER_CONTACT_KEY is set, an encrypted copy lets apps that
+    send email (Bellringer) read it back through get_contacts (see contacts.py)
   - progress is filed under the user name (a nickname), not a real name
 """
 from __future__ import annotations
@@ -17,8 +18,11 @@ import secrets
 
 from psycopg.rows import dict_row
 
+from psycopg.types.json import Jsonb
+
+from learner_mcp import contacts
 from learner_mcp.database import get_connection
-from learner_mcp.models import Person
+from learner_mcp.models import Contact, Person
 
 ITERATIONS = 200_000
 MIN_PASSCODE = 6
@@ -28,7 +32,8 @@ EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 WRONG = "Wrong user name or passcode."
 
 _COLUMNS = ("username, display_name, role, active, passcode_hash is not null as has_passcode, "
-            "email_fp is not null as has_email, created_at, last_sign_in")
+            "email_fp is not null as has_email, email_enc is not null as has_contact, "
+            "app_settings, created_at, last_sign_in")
 
 
 # ---------------- passcodes & email fingerprints ----------------
@@ -98,7 +103,16 @@ def _role(role: str) -> str:
 
 
 def _person(row: dict) -> Person:
-    return Person(**row)
+    return Person(**{**row, "app_settings": row.get("app_settings") or {}})
+
+
+def _settings(app_settings: dict | None) -> dict | None:
+    """Per-app settings, e.g. {"bellringer": {"forms": true}}: one object per app."""
+    if app_settings is None:
+        return None
+    if not isinstance(app_settings, dict) or not all(isinstance(v, dict) for v in app_settings.values()):
+        raise ValueError('app_settings must look like {"app_name": {...}}, one object per app.')
+    return app_settings
 
 
 def _active_parents(cur, excluding: str | None = None) -> int:
@@ -111,7 +125,7 @@ def _active_parents(cur, excluding: str | None = None) -> int:
 
 def add_person(username: str, display_name: str | None = None, role: str = "student",
                passcode: str | None = None, email: str | None = None,
-               passcode_hash: str | None = None) -> Person:
+               passcode_hash: str | None = None, app_settings: dict | None = None) -> Person:
     username, role = _username(username), _role(role)
     if passcode and passcode_hash:
         raise ValueError("Give a passcode or a passcode_hash, not both.")
@@ -119,6 +133,8 @@ def add_person(username: str, display_name: str | None = None, role: str = "stud
         raise ValueError("passcode_hash must be a pbkdf2$... hash (e.g. from an app's old passcode list).")
     stored = hash_passcode(passcode) if passcode else passcode_hash
     fp = email_fingerprint(email) if email else None
+    enc = contacts.encrypt(email.strip().lower()) if email else None
+    settings = _settings(app_settings) or {}
     with get_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("select 1 from learner.people where username = %s", (username,))
         if cur.fetchone():
@@ -128,17 +144,19 @@ def add_person(username: str, display_name: str | None = None, role: str = "stud
             if (other := cur.fetchone()):
                 raise ValueError(f"That email already belongs to {other['username']!r}.")
         cur.execute(
-            f"""insert into learner.people (username, display_name, role, passcode_hash, email_fp)
-                values (%s, %s, %s, %s, %s) returning {_COLUMNS}""",
-            (username, (display_name or "").strip() or None, role, stored, fp),
+            f"""insert into learner.people
+                  (username, display_name, role, passcode_hash, email_fp, email_enc, app_settings)
+                values (%s, %s, %s, %s, %s, %s, %s) returning {_COLUMNS}""",
+            (username, (display_name or "").strip() or None, role, stored, fp, enc, Jsonb(settings)),
         )
         return _person(cur.fetchone())
 
 
 def update_person(username: str, display_name: str | None = None, role: str | None = None,
                   active: bool | None = None, passcode: str | None = None,
-                  email: str | None = None) -> Person:
-    """None leaves a field as it is. email="" removes the email."""
+                  email: str | None = None, app_settings: dict | None = None) -> Person:
+    """None leaves a field as it is. email="" removes the email (fingerprint
+    and stored address). app_settings replaces only the apps it names."""
     username = _username(username)
     sets, args = [], []
     if display_name is not None:
@@ -153,6 +171,10 @@ def update_person(username: str, display_name: str | None = None, role: str | No
     if email is not None:
         fp = email_fingerprint(email) if email.strip() else None
         sets.append("email_fp = %s"); args.append(fp)
+        sets.append("email_enc = %s"); args.append(contacts.encrypt(email.strip().lower()) if fp else None)
+    if app_settings is not None:
+        sets.append("app_settings = coalesce(app_settings, '{}'::jsonb) || %s")
+        args.append(Jsonb(_settings(app_settings)))
     if not sets:
         raise ValueError("Nothing to change.")
     with get_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -231,3 +253,37 @@ def delete_person(username: str, delete_history: bool = True) -> dict:
             sessions = cur.rowcount
         cur.execute("delete from learner.people where username = %s", (username,))
         return {"username": username, "attempts_deleted": attempts, "test_sittings_deleted": sessions}
+
+
+def get_contacts(usernames: list[str] | None = None) -> list[Contact]:
+    """Readable addresses for active people who have one stored (all of them,
+    or just `usernames`). Access is limited in server.py to allowed apps."""
+    names = [(u or "").strip().lower() for u in usernames] if usernames else None
+    with get_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("""select username, display_name, email_enc, app_settings from learner.people
+                        where active and email_enc is not null
+                          and (%s::text[] is null or username = any(%s::text[]))
+                        order by username""", (names, names))
+        rows = cur.fetchall()
+    out = []
+    for r in rows:
+        try:
+            email = contacts.decrypt(r["email_enc"])
+        except ValueError as e:                    # e.g. saved with a retired key
+            contacts.logger.warning("Can't read the stored address for %s: %s", r["username"], e)
+            continue
+        out.append(Contact(username=r["username"], display_name=r["display_name"], email=email,
+                           app_settings=r["app_settings"] or {}))
+    return out
+
+
+def reencrypt_contacts() -> int:
+    """After adding a new key in front of LEARNER_CONTACT_KEY: re-encrypt every
+    stored address with it, so the old key can then be removed."""
+    with get_connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select username, email_enc from learner.people where email_enc is not null for update")
+        rows = cur.fetchall()
+        for r in rows:
+            cur.execute("update learner.people set email_enc = %s where username = %s",
+                        (contacts.rotate(r["email_enc"]), r["username"]))
+        return len(rows)

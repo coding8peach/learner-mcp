@@ -297,6 +297,7 @@ name = "learner-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "mcp", extra = ["cli"] },
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg-pool" },
@@ -311,6 +312,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=50.0.1" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.2.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
     { name = "psycopg-pool", specifier = ">=3.2" },

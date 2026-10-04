@@ -6,8 +6,8 @@ Works for any subject. Apps (Sidekick, AdaptiveSAT, ...) use it to:
     graded here so answers never reach the student early
   - record every practice attempt
   - read a student's progress by topic, with what to focus on next
-  - manage who can sign in (people added by a parent; emails kept only
-    as fingerprints)
+  - manage who can sign in (people added by a parent; emails kept as
+    fingerprints, plus an encrypted copy for apps allowed to send email)
 """
 import logging
 from contextlib import contextmanager
@@ -15,16 +15,18 @@ from datetime import datetime
 
 import psycopg
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 
 from learner_mcp import repository as repo
-from learner_mcp import people
+from learner_mcp import contacts, people
 from learner_mcp.models import (
     PracticePlan,
     SeenItem,
     TopicIn,
     Attempt,
     AttemptIn,
+    Contact,
     Created,
     Person,
     Progress,
@@ -282,6 +284,7 @@ def add_person(
     passcode: str | None = None,
     email: str | None = None,
     passcode_hash: str | None = None,
+    app_settings: dict | None = None,
 ) -> Person:
     """
     Add someone who can sign in (a parent adds people; there's no self
@@ -292,13 +295,16 @@ def add_person(
         role: "student" or "parent" (parents can manage people)
         passcode: easy to remember, at least 6 letters/digits ("maple otter 42");
                   stored only as a salted hash
-        email: optional, to match answers from e.g. Google Forms. Stored only
-               as a keyed fingerprint, never as the email itself
+        email: optional. Stored as a keyed fingerprint (to match answers from
+               e.g. Google Forms) and, if the server has a contact key, as an
+               encrypted copy that only apps allowed to send email can read
         passcode_hash: instead of passcode, an existing pbkdf2$... hash (to
                move people over from an app's old passcode list)
+        app_settings: per-app settings, e.g. {"bellringer": {"forms": true}}
     """
     with expected_errors():
-        return people.add_person(username, display_name, role, passcode, email, passcode_hash)
+        return people.add_person(username, display_name, role, passcode, email, passcode_hash,
+                                 app_settings)
 
 
 @mcp.tool()
@@ -309,11 +315,14 @@ def update_person(
     active: bool | None = None,
     passcode: str | None = None,
     email: str | None = None,
+    app_settings: dict | None = None,
 ) -> Person:
     """Change someone's details. Leave a field out to keep it; email="" removes
-    the email. active=false blocks sign-in but keeps their history."""
+    the email. active=false blocks sign-in but keeps their history.
+    app_settings replaces only the apps it names, e.g. {"bellringer": {"forms": false}}."""
     with expected_errors():
-        return people.update_person(username, display_name, role, active, passcode, email)
+        return people.update_person(username, display_name, role, active, passcode, email,
+                                    app_settings)
 
 
 @mcp.tool()
@@ -329,6 +338,33 @@ def sign_in(username: str, passcode: str) -> Person:
     only "Wrong user name or passcode." (never which one was wrong)."""
     with expected_errors():
         return people.sign_in(username, passcode)
+
+
+def _calling_app(ctx: Context) -> str | None:
+    """The app name auth.py attached to this HTTP request; None on stdio
+    (a local session on the server's own machine, e.g. the MCP Inspector)."""
+    request = ctx.request_context.request if ctx else None
+    if request is None:
+        return None
+    state = getattr(request, "state", None)
+    return getattr(state, "app_name", None) or "unknown"
+
+
+@mcp.tool()
+def get_contacts(usernames: list[str] | None = None, ctx: Context = None) -> list[Contact]:
+    """
+    Readable email addresses, for apps that send email (e.g. Bellringer
+    emailing forms). Only apps listed in LEARNER_CONTACT_APPS may call this;
+    everyone else gets an error. Returns active people with an address on
+    file: all of them, or just `usernames`.
+    """
+    app = _calling_app(ctx)
+    if app is not None and app not in contacts.allowed_apps():
+        logger.warning("Refused get_contacts for app %r", app)
+        raise ToolError(f"The app {app!r} isn't allowed to read email addresses. "
+                        "Add it to LEARNER_CONTACT_APPS on the learner-mcp server if it should.")
+    with expected_errors():
+        return people.get_contacts(usernames)
 
 
 @mcp.tool()

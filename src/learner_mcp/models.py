@@ -325,9 +325,21 @@ class Person(BaseModel):
     role: Literal["student", "parent"]
     active: bool
     has_passcode: bool
-    has_email: bool = Field(description="An email fingerprint is on file (the email itself is never stored)")
+    has_email: bool = Field(description="An email fingerprint is on file, for matching (e.g. Google Form answers)")
+    has_contact: bool = Field(default=False, description=(
+        "An encrypted copy of the email is on file, so apps allowed to send email can read it"))
+    app_settings: dict = Field(default_factory=dict, description=(
+        'Per-app settings, e.g. {"bellringer": {"forms": true}}'))
     created_at: datetime
     last_sign_in: datetime | None = None
+
+
+class Contact(BaseModel):
+    """A readable email address, only for apps allowed to send email."""
+    username: str
+    display_name: str | None = None
+    email: str
+    app_settings: dict = Field(default_factory=dict)
 
 
 SessionDetail.model_rebuild()
